@@ -29,6 +29,7 @@
 #include <mav_trajectory_generation_ros/ros_conversions.h>
 #include <mav_trajectory_generation_ros/ros_visualization.h>
 #include <nav_msgs/Path.h>
+#include <geometry_msgs/PoseStamped.h>
 #include <planning_msgs/PolynomialTrajectory4D.h>
 #include <ros/callback_queue.h>
 #include <ros/ros.h>
@@ -78,9 +79,12 @@ class WaypointNavigatorNode {
   void deletePolynomialMarkers();
 
   // Service callbacks.
-  // Starts the execution of a loaded path.
+  // Starts the execution of a loaded path from file.
   bool executePathCallback(std_srvs::Empty::Request& request,
                            std_srvs::Empty::Response& response);
+  // Strats the execution of a stored waypoints.
+  bool executeWaypointsCallback(
+    std_srvs::Empty::Request& request, std_srvs::Empty::Response& response);
   // Executes a new mission from .yaml file
   bool executePathFromFileCallback(
       waypoint_navigator::ExecutePathFromFile::Request& request,
@@ -92,6 +96,11 @@ class WaypointNavigatorNode {
   // Goes to a custom sequence of(x,y,z) waypoints.
   // Note: Does not add intermediate poses.
   bool goToWaypointsCallback(
+      waypoint_navigator::GoToWaypoints::Request& request,
+      waypoint_navigator::GoToWaypoints::Response& response);
+  // Goes to a custom sequence of(x,y,z) waypoints.
+  // Note: Does not add intermediate poses.
+  bool planToWaypointsCallback(
       waypoint_navigator::GoToWaypoints::Request& request,
       waypoint_navigator::GoToWaypoints::Response& response);
   // Goes to a specific height with current x-y position.
@@ -115,6 +124,7 @@ class WaypointNavigatorNode {
   void visualizationTimerCallback(const ros::TimerEvent&);
 
   void odometryCallback(const nav_msgs::OdometryConstPtr& odometry_message);
+  void mapMissionTfCallback(const geometry_msgs::PoseStamped& map_mission_tf);
 
   static const double kCommandTimerFrequency;
   // Distance before a waypoint is considered reached [m].
@@ -141,15 +151,19 @@ class WaypointNavigatorNode {
   ros::Publisher polynomial_publisher_;
 
   ros::Subscriber odometry_subscriber_;
+  bool map_mission_tf_received_ = false;
+  ros::Subscriber map_mission_tf_subscriber_;
 
   ros::ServiceServer visualize_service_;
   ros::ServiceServer start_service_;
+  ros::ServiceServer start_waypoints_service_;
   ros::ServiceServer takeoff_service_;
   ros::ServiceServer land_service_;
   ros::ServiceServer abort_path_service_;
   ros::ServiceServer new_path_service_;
   ros::ServiceServer waypoint_service_;
   ros::ServiceServer waypoints_service_;
+  ros::ServiceServer plan_waypoints_service_;
   ros::ServiceServer height_service_;
 
   ros::Timer command_timer_;
@@ -182,6 +196,7 @@ class WaypointNavigatorNode {
 
   bool got_odometry_;
   mav_msgs::EigenOdometry odometry_;
+  geometry_msgs::PoseStamped map_mission_tf_;
 
   // A list of waypoints to visit.
   // [x,y,z,heading]

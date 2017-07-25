@@ -30,6 +30,7 @@
 #include <fstream>
 #include <iostream>
 
+
 #include <waypoint_navigator/waypoint_navigator_node.h>
 
 namespace waypoint_navigator {
@@ -53,6 +54,8 @@ WaypointNavigatorNode::WaypointNavigatorNode(const ros::NodeHandle& nh,
 
   odometry_subscriber_ = nh_.subscribe(
       "odometry", 1, &WaypointNavigatorNode::odometryCallback, this);
+  map_mission_tf_subscriber_ = nh_.subscribe(
+      "map_mission_tf", 1, &WaypointNavigatorNode::mapMissionTfCallback, this);
   pose_publisher_ = nh_.advertise<geometry_msgs::PoseStamped>(
       mav_msgs::default_topics::COMMAND_POSE, 1);
   path_segments_publisher_ =
@@ -70,6 +73,8 @@ WaypointNavigatorNode::WaypointNavigatorNode(const ros::NodeHandle& nh,
       "visualize_path", &WaypointNavigatorNode::visualizePathCallback, this);
   start_service_ = nh_.advertiseService(
       "execute_path", &WaypointNavigatorNode::executePathCallback, this);
+  start_waypoints_service_ = nh_.advertiseService(
+      "execute_waypoints", &WaypointNavigatorNode::executeWaypointsCallback, this);
   takeoff_service_ = nh_.advertiseService(
       "takeoff", &WaypointNavigatorNode::takeoffCallback, this);
   land_service_ =
@@ -83,6 +88,8 @@ WaypointNavigatorNode::WaypointNavigatorNode(const ros::NodeHandle& nh,
       "go_to_waypoint", &WaypointNavigatorNode::goToWaypointCallback, this);
   waypoints_service_ = nh_.advertiseService(
       "go_to_waypoints", &WaypointNavigatorNode::goToWaypointsCallback, this);
+  plan_waypoints_service_ = nh_.advertiseService(
+      "plan_to_waypoints", &WaypointNavigatorNode::planToWaypointsCallback, this);
   height_service_ = nh_.advertiseService(
       "go_to_height", &WaypointNavigatorNode::goToHeightCallback, this);
 
@@ -244,6 +251,44 @@ bool WaypointNavigatorNode::loadPathFromFile() {
   LOG(INFO) << "Path loaded from file. Number of points in path: "
             << coarse_waypoints_.size();
 
+  CHECK(map_mission_tf_received_) << "No map_mission_tf received";
+  // Transform points of map frame into mission frame
+  /// Tf from Map frame G to Mission frame M
+  Eigen::Vector3d G_T_M (map_mission_tf_.pose.position.x,
+                             map_mission_tf_.pose.position.y,
+                             map_mission_tf_.pose.position.z
+                             );
+  /// Quat from Map frame G to mission frame M
+  Eigen::Quaterniond G_q_M (
+                          map_mission_tf_.pose.orientation.w,
+                          map_mission_tf_.pose.orientation.x,
+                          map_mission_tf_.pose.orientation.y,
+                          map_mission_tf_.pose.orientation.z
+                          );
+  // Waypoints are given in Map frame
+  for (mav_msgs::EigenTrajectoryPoint& wp: coarse_waypoints_) {
+    // Apply tf from map to mission
+    /// Waypoint position from mission frame M expressed in map frame G
+    wp.position_W = wp.position_W - G_T_M;
+    /// Rotate waypoint position from map frame to mission frame
+    // Step 1: Make a quaternion out of the vector to rotate.
+    Eigen::Quaterniond quat_wp_map_frame (0,
+                               wp.position_W.x(),
+                               wp.position_W.y(),
+                               wp.position_W.z()
+                               );
+    // Step 2: Rotate the vector through the quaternion.
+    Eigen::Quaterniond rotated =
+        G_q_M.inverse()*quat_wp_map_frame*G_q_M; // From map to mission
+    // Step 3: Extract the vector from the rotated quaternion.
+    wp.position_W.x() = rotated.x();
+    wp.position_W.y() = rotated.y();
+    wp.position_W.z() = rotated.z();
+
+
+    wp.orientation_W_B = G_q_M.inverse()*wp.orientation_W_B;
+  }
+
   current_leg_ = 0;
   return true;
 }
@@ -385,7 +430,26 @@ bool WaypointNavigatorNode::executePathCallback(
   // Display the path markers in rviz.
   std_srvs::Empty::Request empty_request;
   std_srvs::Empty::Response empty_response;
+
+  // Change frame_id_ to mission since now the loadPathFromFile switches
+  // the wp from map frame to mission frame
+  std::string frame_id_prev = frame_id_;
+  frame_id_ = "mission";
   visualizePathCallback(empty_request, empty_response);
+  frame_id_ = frame_id_prev;
+
+  publishCommands();
+  LOG(INFO) << "Starting path execution...";
+  return true;
+}
+
+bool WaypointNavigatorNode::executeWaypointsCallback(
+    std_srvs::Empty::Request& request, std_srvs::Empty::Response& response) {
+  //CHECK(got_odometry_)
+   //   << "No odometry received yet, can't start path following.";
+  command_timer_.stop();
+  current_leg_ = 0;
+  timer_counter_ = 0;
 
   publishCommands();
   LOG(INFO) << "Starting path execution...";
@@ -494,6 +558,60 @@ bool WaypointNavigatorNode::goToWaypointsCallback(
       nh_.createTimer(ros::Duration(0.1),
                       &WaypointNavigatorNode::visualizationTimerCallback, this);
   publishCommands();
+  return true;
+}
+
+bool WaypointNavigatorNode::planToWaypointsCallback(
+    waypoint_navigator::GoToWaypoints::Request& request,
+    waypoint_navigator::GoToWaypoints::Response& response) {
+  coarse_waypoints_.clear();
+  current_leg_ = 0;
+  timer_counter_ = 0;
+  command_timer_.stop();
+
+  addCurrentOdometryWaypoint();
+
+  // Add points to a new path.
+  std::vector<geometry_msgs::Point> points = request.points;
+  mav_msgs::EigenTrajectoryPoint vwp;
+  for (size_t i = 0; i < points.size(); ++i) {
+    vwp.position_W.x() = points[i].x;
+    vwp.position_W.y() = points[i].y;
+    vwp.position_W.z() = points[i].z;
+    coarse_waypoints_.push_back(vwp);
+  }
+
+  // Add heading to path.
+  for (size_t i = 0; i < coarse_waypoints_.size(); i++) {
+    if (heading_mode_ == "auto") {
+      if (i == 0) {
+        continue;
+      }
+      // Compute heading in direction towards next point.
+      coarse_waypoints_[i].setFromYaw(
+          atan2(coarse_waypoints_[i].position_W.y() -
+                    coarse_waypoints_[i - 1].position_W.y(),
+                coarse_waypoints_[i].position_W.x() -
+                    coarse_waypoints_[i - 1].position_W.x()));
+    }
+    // For both 'manual' and 'zero' heading modes, set zero heading.
+    else {
+      coarse_waypoints_[i].setFromYaw(0.0);
+    }
+  }
+
+  // Limit maximum distance between waypoints.
+  if (intermediate_poses_) {
+    addIntermediateWaypoints();
+  }
+
+  // Display the path markers in rviz.
+  visualization_timer_ =
+      nh_.createTimer(ros::Duration(0.1),
+                      &WaypointNavigatorNode::visualizationTimerCallback, this);
+  if (path_mode_ == "polynomial") {
+    createTrajectory();
+  }
   return true;
 }
 
@@ -679,7 +797,15 @@ void WaypointNavigatorNode::odometryCallback(
   }
   mav_msgs::eigenOdometryFromMsg(*odometry_message, &odometry_);
 }
+
+void WaypointNavigatorNode::mapMissionTfCallback(
+    const geometry_msgs::PoseStamped& map_mission_tf) {
+  map_mission_tf_received_ = true;
+  map_mission_tf_ = map_mission_tf;
 }
+
+} // end namespace
+
 
 int main(int argc, char** argv) {
   // Start the logging.
