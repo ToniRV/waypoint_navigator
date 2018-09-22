@@ -36,7 +36,6 @@
 namespace waypoint_navigator {
 const double WaypointNavigatorNode::kCommandTimerFrequency = 5.0;
 const double WaypointNavigatorNode::kWaypointAchievementDistance = 0.5;
-const double WaypointNavigatorNode::kFabianConstant = 6.5;
 const double WaypointNavigatorNode::kIntermediatePoseTolerance = 0.1;
 const int WaypointNavigatorNode::kDimensions = 3;
 const int WaypointNavigatorNode::kDerivativeToOptimize =
@@ -59,7 +58,7 @@ WaypointNavigatorNode::WaypointNavigatorNode(const ros::NodeHandle& nh,
   pose_publisher_ = nh_.advertise<geometry_msgs::PoseStamped>(
       mav_msgs::default_topics::COMMAND_POSE, 1);
   path_segments_publisher_ =
-      nh_.advertise<planning_msgs::PolynomialTrajectory4D>("path_segments", 1);
+      nh_.advertise<mav_planning_msgs::PolynomialTrajectory4D>("path_segments", 1);
 
   // Visualization.
   path_points_marker_publisher_ = nh_.advertise<visualization_msgs::Marker>(
@@ -90,6 +89,8 @@ WaypointNavigatorNode::WaypointNavigatorNode(const ros::NodeHandle& nh,
       "go_to_waypoints", &WaypointNavigatorNode::goToWaypointsCallback, this);
   plan_waypoints_service_ = nh_.advertiseService(
       "plan_to_waypoints", &WaypointNavigatorNode::planToWaypointsCallback, this);
+  pose_waypoints_service_ = nh_.advertiseService(
+      "go_to_pose_waypoints", &WaypointNavigatorNode::goToPoseWaypointsCallback, this);
   height_service_ = nh_.advertiseService(
       "go_to_height", &WaypointNavigatorNode::goToHeightCallback, this);
 
@@ -376,7 +377,8 @@ void WaypointNavigatorNode::createTrajectory() {
   std::vector<double> segment_times;
   segment_times =
       estimateSegmentTimes(polynomial_vertices_, reference_speed_,
-                           reference_acceleration_, kFabianConstant);
+                           reference_acceleration_);
+
   mav_trajectory_generation::PolynomialOptimization<kPolynomialCoefficients>
       opt(kDimensions);
   opt.setupFromVertices(polynomial_vertices_, segment_times,
@@ -400,7 +402,7 @@ void WaypointNavigatorNode::publishCommands() {
   } else if (path_mode_ == "polynomial") {
     createTrajectory();
     // Publish the trajectory directly to the trajectory sampler.
-    planning_msgs::PolynomialTrajectory4D msg;
+    mav_planning_msgs::PolynomialTrajectory4D msg;
     mav_trajectory_generation::Trajectory traj_with_yaw;
     polynomial_trajectory_.getTrajectoryWithAppendedDimension(yaw_trajectory_,
                                                               &traj_with_yaw);
@@ -612,6 +614,57 @@ bool WaypointNavigatorNode::planToWaypointsCallback(
   if (path_mode_ == "polynomial") {
     createTrajectory();
   }
+  return true;
+}
+
+bool WaypointNavigatorNode::goToPoseWaypointsCallback(
+    waypoint_navigator::GoToPoseWaypoints::Request& request,
+    waypoint_navigator::GoToPoseWaypoints::Response& response) {
+  coarse_waypoints_.clear();
+  current_leg_ = 0;
+  timer_counter_ = 0;
+  command_timer_.stop();
+
+  // Add points to a new path.
+  std::vector<geometry_msgs::Pose> waypoints = request.waypoints;
+  mav_msgs::EigenTrajectoryPoint vwp;
+  for (size_t i = 0; i < waypoints.size(); ++i) {
+    vwp.position_W.x() = waypoints[i].position.x;
+    vwp.position_W.y() = waypoints[i].position.y;
+    vwp.position_W.z() = waypoints[i].position.z;
+
+    vwp.orientation_W_B.x() = waypoints[i].orientation.x;
+    vwp.orientation_W_B.y() = waypoints[i].orientation.y;
+    vwp.orientation_W_B.z() = waypoints[i].orientation.z;
+    vwp.orientation_W_B.w() = waypoints[i].orientation.w;
+
+    if (i==0)
+    {
+      const double dist_to_end =
+        (vwp.position_W - odometry_.position_W).norm();
+          
+      if (dist_to_end > kWaypointAchievementDistance) {
+        LOG(INFO) << "Extra waypoint added because current pose is too far (" << dist_to_end << "m) from the first waypoint.";
+        addCurrentOdometryWaypoint();
+      }
+    }
+
+    coarse_waypoints_.push_back(vwp);
+  }
+
+  if(coarse_waypoints_.size() > 1)
+  {
+    LOG(INFO) << coarse_waypoints_.size()<<" waypoints received.";
+    // Display the path markers in rviz.
+    visualization_timer_ =
+      nh_.createTimer(ros::Duration(0.1),
+                      &WaypointNavigatorNode::visualizationTimerCallback, this);
+    publishCommands();
+  }else{
+    LOG(INFO) << " Nothing to do because the destination is too close.";
+    return false;
+  }
+
   return true;
 }
 

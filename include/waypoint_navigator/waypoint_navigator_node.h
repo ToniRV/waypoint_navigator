@@ -45,6 +45,7 @@
 #include <waypoint_navigator/GoToHeight.h>
 #include <waypoint_navigator/GoToWaypoint.h>
 #include <waypoint_navigator/GoToWaypoints.h>
+#include <waypoint_navigator/GoToPoseWaypoints.h>
 
 namespace waypoint_navigator {
 class WaypointNavigatorNode {
@@ -98,8 +99,11 @@ class WaypointNavigatorNode {
   bool goToWaypointsCallback(
       waypoint_navigator::GoToWaypoints::Request& request,
       waypoint_navigator::GoToWaypoints::Response& response);
-  // Goes to a custom sequence of(x,y,z) waypoints.
+  // Goes to a custom sequence of Pose waypoints, but only yaw is used.
   // Note: Does not add intermediate poses.
+  bool goToPoseWaypointsCallback(
+      waypoint_navigator::GoToPoseWaypoints::Request& request,
+      waypoint_navigator::GoToPoseWaypoints::Response& response);
   bool planToWaypointsCallback(
       waypoint_navigator::GoToWaypoints::Request& request,
       waypoint_navigator::GoToWaypoints::Response& response);
@@ -129,8 +133,6 @@ class WaypointNavigatorNode {
   static const double kCommandTimerFrequency;
   // Distance before a waypoint is considered reached [m].
   static const double kWaypointAchievementDistance;
-  // Tuning parameter for time allocation.
-  static const double kFabianConstant;
   // Minimum distance between intermediate waypoints [m].
   static const double kIntermediatePoseTolerance;
   // Number of dimensions in the problem.
@@ -164,6 +166,7 @@ class WaypointNavigatorNode {
   ros::ServiceServer waypoint_service_;
   ros::ServiceServer waypoints_service_;
   ros::ServiceServer plan_waypoints_service_;
+  ros::ServiceServer pose_waypoints_service_;
   ros::ServiceServer height_service_;
 
   ros::Timer command_timer_;
